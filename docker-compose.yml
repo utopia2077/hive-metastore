@@ -1,4 +1,4 @@
-version: '3.9'
+version: '3'
 
 services:
   postgres:
@@ -12,29 +12,35 @@ services:
     ports:
       - '5432:5432'
 
-  localstack:
-    image: localstack/localstack:1.1
+  minio:
+    image: minio/minio
     ports:
-      - ${LOCALSTACK_PORT}:${LOCALSTACK_PORT}
-    environment:
-      - DOCKER_HOST=unix:///var/run/docker.sock
+      - "19000:9000"
+      - "19001:9001"
     volumes:
-      - "/tmp/localstack:/var/lib/localstack"
-      - "/var/run/docker.sock:/var/run/docker.sock"
-
-  s3_setup:
-    image: localstack/localstack:1.1
-    depends_on:
-      localstack:
-        condition: service_healthy
-    entrypoint: ["aws", "--endpoint-url", "http://localstack:4566", "s3api", "create-bucket", "--bucket", "${S3_BUCKET}"]
+      - ./datastore:/data
     environment:
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
+      - MINIO_ACCESS_KEY
+      - MINIO_SECRET_KEY
+    command: server --console-address ':9001' /data
 
-  app:
-    build: .
+  createbuckets:
+    image: minio/mc
     depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY};
+      /usr/bin/mc mb myminio/${S3_BUCKET};
+      /usr/bin/mc policy set public ${S3_BUCKET};
+      exit 0;
+      "
+  hive-metastore-standalone:
+    build: .
+    image: hive-metastore-standalone:latest
+    depends_on:
+      createbuckets:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -42,22 +48,11 @@ services:
       - DATABASE_DB=${POSTGRES_DB}
       - DATABASE_USER=${POSTGRES_USER}
       - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
-      - S3_ENDPOINT_URL=http://localstack:${LOCALSTACK_PORT}
+      - AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+      - S3_ENDPOINT_URL=http://minio:9000
       - S3_BUCKET
       - S3_PREFIX
     ports:
-      - '9083:9083'
+      - '19083:9083'
 
-  test:
-    image: python:3.10-alpine
-    command: ["./test.sh"]
-    profiles:
-      - dev
-    working_dir: /scripts
-    volumes:
-      - ./scripts:/scripts
-    environment:
-      - HIVE_HOST=app
-      - HIVE_PORT=9083
